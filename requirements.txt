@@ -1,0 +1,11 @@
+bs4
+ezdxf
+openpyxl
+pandas
+pygame
+qrcode
+requests
+selenium
+torch
+torchvision
+tqdm
