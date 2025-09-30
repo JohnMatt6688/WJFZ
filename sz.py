@@ -1,3 +1,4 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -9,21 +10,22 @@ from email import encoders
 from email.mime.text import MIMEText
 from io import BytesIO
 from datetime import datetime
-import base64
 
 # ======================
-# 配置区（必填项）
+# 配置区（从环境变量读取）
 # ======================
 SMTP_SERVER = "smtp.126.com"
 SMTP_PORT = 465
-EMAIL_ACCOUNT = "attchn@126.com"
-EMAIL_PASSWORD_ENCRYPTED = "QVZlMzlEYWVDNUpQVHV3aQ=="  # Base64 加密密码
-RECIPIENT_EMAIL = "179107519@qq.com"
+EMAIL_ACCOUNT = os.environ.get("EMAIL_ACCOUNT")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")      # 直接使用授权码（明文，但由 GitHub Secrets 保护）
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL")
 ENCODING = 'UTF-8'  # 苏州房管局网页实际编码
 
-def decrypt_password(encoded_password):
-    """ 解密Base64编码的密码 """
-    return base64.b64decode(encoded_password).decode('utf-8')
+# 安全检查：确保 secrets 已设置
+if not all([EMAIL_ACCOUNT, EMAIL_PASSWORD, RECIPIENT_EMAIL]):
+    raise EnvironmentError(
+        "缺失环境变量！请在 GitHub Secrets 中设置：EMAIL_ACCOUNT, EMAIL_PASSWORD, RECIPIENT_EMAIL"
+    )
 
 def debug_log(message):
     """ 调试日志输出 """
@@ -35,7 +37,7 @@ def fetch_web_data():
         response = requests.get(
             "http://clf.zfcjj.suzhou.gov.cn/xsinfo.aspx",
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             },
             timeout=15
         )
@@ -43,12 +45,19 @@ def fetch_web_data():
         soup = BeautifulSoup(response.content.decode(ENCODING), 'html.parser')
         table = soup.find('table', id='ctl00_ContentPlaceHolder1_mytable')
         
+        if table is None:
+            debug_log("未找到目标表格，可能网页结构已变更")
+            return pd.DataFrame()
+        
         raw_data = []
         current_region = None
         rowspan_left = 0
 
         for row in table.find_all('tr')[1:]:
             cells = row.find_all(['th', 'td'])
+            if not cells:
+                continue
+            # 处理区域 rowspan
             if cells[0].name == 'th' and 'rowspan' in cells[0].attrs:
                 current_region = cells[0].get_text(strip=True)
                 rowspan_left = int(cells[0]['rowspan']) - 1
@@ -79,6 +88,9 @@ def fetch_web_data():
 
 def process_data(raw_df):
     """ 数据处理 """
+    if raw_df.empty:
+        return pd.DataFrame()
+    
     processed = []
     current_group = []
     for _, row in raw_df.iterrows():
@@ -134,17 +146,20 @@ def send_email_with_excel(df):
         try:
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, context=context) as server:
-                server.login(EMAIL_ACCOUNT, decrypt_password(EMAIL_PASSWORD_ENCRYPTED))
+                server.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
                 server.sendmail(EMAIL_ACCOUNT, RECIPIENT_EMAIL, msg.as_string())
             print(f"✅ 邮件已发送至 {RECIPIENT_EMAIL}")
         except Exception as e:
             print(f"❌ 邮件发送失败: {str(e)}")
 
 if __name__ == "__main__":
-    print("=== 数据抓取开始 ===")
+    print("=== 苏州市房产成交数据抓取开始 ===")
     raw_df = fetch_web_data()
     if not raw_df.empty:
         processed_df = process_data(raw_df)
-        send_email_with_excel(processed_df)
+        if not processed_df.empty:
+            send_email_with_excel(processed_df)
+        else:
+            print("⚠️ 数据处理后为空，未发送邮件")
     else:
-        print("❌ 数据获取失败，请检查网络或编码设置")
+        print("❌ 数据获取失败，请检查网络或网页结构是否变更")
